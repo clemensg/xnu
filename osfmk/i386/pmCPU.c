@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -41,19 +41,16 @@
 #include <kern/machine.h>
 #include <kern/pms.h>
 #include <kern/processor.h>
+#include <kern/etimer.h>
 #include <i386/cpu_threads.h>
 #include <i386/pmCPU.h>
 #include <i386/cpuid.h>
-#include <i386/rtclock.h>
+#include <i386/rtclock_protos.h>
 #include <kern/sched_prim.h>
 #include <i386/lapic.h>
+#include <i386/pal_routines.h>
 
-/*
- * Kernel parameter determining whether threads are halted unconditionally
- * in the idle state.  This is the default behavior.
- * See machine_idle() for use.
- */
-int idlehalt					= 1;
+#include <sys/kdebug.h>
 
 extern int disableConsoleOutput;
 
@@ -65,6 +62,7 @@ decl_simple_lock_data(,pm_init_lock);
 pmDispatch_t	*pmDispatch	= NULL;
 
 static uint32_t		pmInitDone	= 0;
+static boolean_t	earlyTopology	= FALSE;
 
 
 /*
@@ -99,21 +97,14 @@ machine_idle(void)
     if (my_cpu == NULL)
 	goto out;
 
-    /*
-     * If idlehalt isn't set, then don't do any power management related
-     * idle handling.
-     */
-    if (!idlehalt)
-	goto out;
-
     my_cpu->lcpu.state = LCPU_IDLE;
     DBGLOG(cpu_handle, cpu_number(), MP_IDLE);
     MARK_CPU_IDLE(cpu_number());
 
     if (pmInitDone
 	&& pmDispatch != NULL
-	&& pmDispatch->cstateMachineIdle != NULL)
-	(*pmDispatch->cstateMachineIdle)(0x7FFFFFFFFFFFFFFFULL);
+	&& pmDispatch->MachineIdle != NULL)
+	(*pmDispatch->MachineIdle)(0x7FFFFFFFFFFFFFFFULL);
     else {
 	/*
 	 * If no power management, re-enable interrupts and halt.
@@ -122,7 +113,10 @@ machine_idle(void)
 	 * cause problems in some MP configurations w.r.t. the APIC
 	 * stopping during a GV3 transition).
 	 */
-	__asm__ volatile ("sti; hlt");
+	pal_hlt();
+
+	/* Once woken, re-disable interrupts. */
+	pal_cli();
     }
 
     /*
@@ -136,7 +130,7 @@ machine_idle(void)
      * Re-enable interrupts.
      */
   out:
-    __asm__ volatile("sti");
+    pal_sti();
 }
 
 /*
@@ -151,19 +145,19 @@ pmCPUHalt(uint32_t reason)
     switch (reason) {
     case PM_HALT_DEBUG:
 	cpup->lcpu.state = LCPU_PAUSE;
-	__asm__ volatile ("wbinvd; hlt");
+	pal_stop_cpu(FALSE);
 	break;
 
     case PM_HALT_PANIC:
 	cpup->lcpu.state = LCPU_PAUSE;
-	__asm__ volatile ("cli; wbinvd; hlt");
+	pal_stop_cpu(TRUE);
 	break;
 
     case PM_HALT_NORMAL:
     default:
-	__asm__ volatile ("cli");
+        pal_cli();
 
-    if (pmInitDone
+	if (pmInitDone
 	    && pmDispatch != NULL
 	    && pmDispatch->pmCPUHalt != NULL) {
 	    /*
@@ -177,7 +171,8 @@ pmCPUHalt(uint32_t reason)
 	    i386_init_slave_fast();
 
 	    panic("init_slave_fast returned");
-	} else {
+	} else
+	{
 	    /*
 	     * If no power managment and a processor is taken off-line,
 	     * then invalidate the cache and halt it (it will not be able
@@ -185,10 +180,11 @@ pmCPUHalt(uint32_t reason)
 	     */
 	    __asm__ volatile ("wbinvd");
 	    cpup->lcpu.state = LCPU_HALT;
-	    __asm__ volatile ( "wbinvd; hlt" );
+	    pal_stop_cpu(FALSE);
 
 	    panic("back from Halt");
 	}
+
 	break;
     }
 }
@@ -205,6 +201,9 @@ pmMarkAllCPUsOff(void)
 static void
 pmInitComplete(void)
 {
+    if (earlyTopology && pmDispatch != NULL && pmDispatch->pmCPUStateInit != NULL)
+	(*pmDispatch->pmCPUStateInit)();
+
     pmInitDone = 1;
 }
 
@@ -277,11 +276,13 @@ pmLockCPUTopology(int lock)
 /*
  * Called to get the next deadline that has been set by the
  * power management code.
+ * Note: a return of 0 from AICPM and this routine signifies
+ * that no deadline is set.
  */
 uint64_t
 pmCPUGetDeadline(cpu_data_t *cpu)
 {
-    uint64_t	deadline	= EndOfAllTime;
+    uint64_t	deadline	= 0;
 
 	if (pmInitDone
 	&& pmDispatch != NULL
@@ -370,6 +371,8 @@ pmCPUStateInit(void)
 {
     if (pmDispatch != NULL && pmDispatch->pmCPUStateInit != NULL)
 	(*pmDispatch->pmCPUStateInit)();
+    else
+	earlyTopology = TRUE;
 }
 
 /*
@@ -506,6 +509,19 @@ ml_set_maxintdelay(uint64_t mdelay)
 	pmDispatch->setMaxIntDelay(mdelay);
 }
 
+boolean_t
+ml_get_interrupt_prewake_applicable()
+{
+    boolean_t applicable = FALSE;
+
+    if (pmInitDone 
+	&& pmDispatch != NULL
+	&& pmDispatch->pmInterruptPrewakeApplicable != NULL)
+	applicable = pmDispatch->pmInterruptPrewakeApplicable();
+
+    return applicable;
+}
+
 /*
  * Put a CPU into "safe" mode with respect to power.
  *
@@ -561,13 +577,118 @@ machine_run_count(uint32_t count)
 }
 
 boolean_t
-machine_cpu_is_inactive(int cpu)
+machine_processor_is_inactive(processor_t processor)
 {
+    int		cpu = processor->cpu_id;
+
     if (pmDispatch != NULL
 	&& pmDispatch->pmIsCPUUnAvailable != NULL)
 	return(pmDispatch->pmIsCPUUnAvailable(cpu_to_lcpu(cpu)));
     else
 	return(FALSE);
+}
+
+processor_t
+machine_choose_processor(processor_set_t pset,
+			 processor_t preferred)
+{
+    int		startCPU;
+    int		endCPU;
+    int		preferredCPU;
+    int		chosenCPU;
+
+    if (!pmInitDone)
+	return(preferred);
+
+    if (pset == NULL) {
+	startCPU = -1;
+	endCPU = -1;
+    } else {
+	startCPU = pset->cpu_set_low;
+	endCPU = pset->cpu_set_hi;
+    }
+
+    if (preferred == NULL)
+	preferredCPU = -1;
+    else
+	preferredCPU = preferred->cpu_id;
+
+    if (pmDispatch != NULL
+	&& pmDispatch->pmChooseCPU != NULL) {
+	chosenCPU = pmDispatch->pmChooseCPU(startCPU, endCPU, preferredCPU);
+
+	if (chosenCPU == -1)
+	    return(NULL);
+	return(cpu_datap(chosenCPU)->cpu_processor);
+    }
+
+    return(preferred);
+}
+
+static int
+pmThreadGetUrgency(uint64_t *rt_period, uint64_t *rt_deadline)
+{
+
+    return(thread_get_urgency(rt_period, rt_deadline));
+}
+
+#if	DEBUG
+uint32_t	urgency_stats[64][THREAD_URGENCY_MAX];
+#endif
+
+#define		URGENCY_NOTIFICATION_ASSERT_NS (5 * 1000 * 1000)
+uint64_t	urgency_notification_assert_abstime_threshold, urgency_notification_max_recorded;
+
+void
+thread_tell_urgency(int urgency,
+    uint64_t rt_period,
+    uint64_t rt_deadline)
+{
+	uint64_t	urgency_notification_time_start, delta;
+	boolean_t	urgency_assert = (urgency_notification_assert_abstime_threshold != 0);
+	assert(get_preemption_level() > 0 || ml_get_interrupts_enabled() == FALSE);
+#if	DEBUG
+	urgency_stats[cpu_number() % 64][urgency]++;
+#endif
+	if (!pmInitDone
+	    || pmDispatch == NULL
+	    || pmDispatch->pmThreadTellUrgency == NULL)
+		return;
+
+	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_START, urgency, rt_period, (rt_deadline >> 32), rt_deadline, 0);
+
+	if (__improbable((urgency_assert == TRUE)))
+		urgency_notification_time_start = mach_absolute_time();
+
+	pmDispatch->pmThreadTellUrgency(urgency, rt_period, rt_deadline);
+
+	if (__improbable((urgency_assert == TRUE))) {
+		delta = mach_absolute_time() - urgency_notification_time_start;
+
+		if (__improbable(delta > urgency_notification_max_recorded)) {
+			/* This is not synchronized, but it doesn't matter
+			 * if we (rarely) miss an event, as it is statistically
+			 * unlikely that it will never recur.
+			 */
+			urgency_notification_max_recorded = delta;
+
+			if (__improbable((delta > urgency_notification_assert_abstime_threshold) && !machine_timeout_suspended()))
+				panic("Urgency notification callout %p exceeded threshold, 0x%llx abstime units", pmDispatch->pmThreadTellUrgency, delta);
+		}
+	}
+
+	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_END, urgency, rt_period, (rt_deadline >> 32), rt_deadline, 0);
+}
+
+void
+active_rt_threads(boolean_t active)
+{
+    if (!pmInitDone
+	|| pmDispatch == NULL
+	|| pmDispatch->pmActiveRTThreads == NULL)
+	return;
+
+    pmDispatch->pmActiveRTThreads(active);
 }
 
 static uint32_t
@@ -619,6 +740,32 @@ pmSendIPI(int cpu)
     lapic_send_ipi(cpu, LAPIC_PM_INTERRUPT);
 }
 
+static void
+pmGetNanotimeInfo(pm_rtc_nanotime_t *rtc_nanotime)
+{
+	/*
+	 * Make sure that nanotime didn't change while we were reading it.
+	 */
+	do {
+		rtc_nanotime->generation = pal_rtc_nanotime_info.generation; /* must be first */
+		rtc_nanotime->tsc_base = pal_rtc_nanotime_info.tsc_base;
+		rtc_nanotime->ns_base = pal_rtc_nanotime_info.ns_base;
+		rtc_nanotime->scale = pal_rtc_nanotime_info.scale;
+		rtc_nanotime->shift = pal_rtc_nanotime_info.shift;
+	} while(pal_rtc_nanotime_info.generation != 0
+		&& rtc_nanotime->generation != pal_rtc_nanotime_info.generation);
+}
+
+static uint32_t
+pmTimerQueueMigrate(int target_cpu)
+{
+    /* Call the etimer code to do this. */
+    return (target_cpu != cpu_number())
+		? etimer_queue_migrate(target_cpu)
+		: 0;
+}
+
+
 /*
  * Called by the power management kext to register itself and to get the
  * callbacks it might need into other kernel functions.  This interface
@@ -647,8 +794,16 @@ pmKextRegister(uint32_t version, pmDispatch_t *cpuFuncs,
 	callbacks->LCPUtoProcessor      = pmLCPUtoProcessor;
 	callbacks->ThreadBind           = thread_bind;
 	callbacks->GetSavedRunCount     = pmGetSavedRunCount;
-	callbacks->pmSendIPI		= pmSendIPI;
+	callbacks->GetNanotimeInfo	= pmGetNanotimeInfo;
+	callbacks->ThreadGetUrgency	= pmThreadGetUrgency;
+	callbacks->RTCClockAdjust	= rtc_clock_adjust;
+	callbacks->timerQueueMigrate    = pmTimerQueueMigrate;
 	callbacks->topoParms            = &topoParms;
+	callbacks->pmSendIPI		= pmSendIPI;
+	callbacks->InterruptPending	= lapic_is_interrupt_pending;
+	callbacks->IsInterrupting	= lapic_is_interrupting;
+	callbacks->InterruptStats	= lapic_interrupt_counts;
+	callbacks->DisableApicTimer	= lapic_disable_timer;
     } else {
 	panic("Version mis-match between Kernel and CPU PM");
     }

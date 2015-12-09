@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -66,6 +66,14 @@
 #define	ETHER_MAX_LEN		1518
 
 /*
+ * Mbuf adjust factor to force 32-bit alignment of IP header.
+ * Drivers should do m_adj(m, ETHER_ALIGN) when setting up a
+ * receive so the upper layers get the IP header properly aligned
+ * past the 14-byte Ethernet header.
+ */
+#define ETHER_ALIGN             2       /* driver adjust for IP hdr alignment */
+
+/*
  * A macro to validate a length with
  */
 #define	ETHER_IS_VALID_LEN(foo)	\
@@ -95,6 +103,8 @@ struct	ether_addr {
 #define ETHERTYPE_REVARP	0x8035	/* reverse Addr. resolution protocol */
 #define	ETHERTYPE_VLAN		0x8100	/* IEEE 802.1Q VLAN tagging */
 #define ETHERTYPE_IPV6		0x86dd	/* IPv6 */
+#define ETHERTYPE_PAE		0x888e  /* EAPOL PAE/802.1x */
+#define ETHERTYPE_RSN_PREAUTH	0x88c7  /* 802.11i / RSN Pre-Authentication */
 #define	ETHERTYPE_LOOPBACK	0x9000	/* used to test interfaces */
 /* XXX - add more useful types here */
 
@@ -118,7 +128,26 @@ struct	ether_addr *ether_aton(const char *);
 
 #ifdef BSD_KERNEL_PRIVATE
 extern u_char	etherbroadcastaddr[ETHER_ADDR_LEN];
-#endif
+
+
+static __inline__ int
+_ether_cmp(const void * a, const void * b)
+{
+	const u_int16_t * a_s = (const u_int16_t *)a;
+	const u_int16_t * b_s = (const u_int16_t *)b;
+	
+	if (a_s[0] != b_s[0]
+		|| a_s[1] != b_s[1]
+		|| a_s[2] != b_s[2]) {
+		return (1);
+	}
+	return (0);
+}
+
+#endif /* BSD_KERNEL_PRIVATE */
+
+#define ETHER_IS_MULTICAST(addr) (*(addr) & 0x01) /* is address mcast/bcast? */
+
 #endif /* KERNEL_PRIVATE */
 
 #ifndef KERNEL

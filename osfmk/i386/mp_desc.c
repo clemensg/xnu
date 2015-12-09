@@ -62,6 +62,7 @@
 #include <kern/cpu_data.h>
 #include <mach/mach_types.h>
 #include <mach/machine.h>
+#include <kern/etimer.h>
 #include <mach/vm_map.h>
 #include <mach/machine/vm_param.h>
 #include <vm/vm_kern.h>
@@ -79,7 +80,6 @@
 #include <kern/misc_protos.h>
 
 #include <mach_kdb.h>
-
 
 #ifdef __x86_64__
 #define K_INTR_GATE (ACC_P|ACC_PL_K|ACC_INTR_GATE)
@@ -107,7 +107,7 @@
 #undef USER_TRAP_SPC
 
 #define TRAP(n, name)			\
-	[n] {				\
+	[n] = {				\
 		(uintptr_t)&name,	\
 		KERNEL64_CS,		\
 		0,			\
@@ -119,7 +119,7 @@
 #define TRAP_SPC TRAP
 
 #define TRAP_IST(n, name) \
-	[n] {				\
+	[n] = {				\
 		(uintptr_t)&name,	\
 		KERNEL64_CS,		\
 		1,			\
@@ -128,7 +128,7 @@
 	},
 
 #define INTERRUPT(n) \
-	[n] {				\
+	[n] = {				\
 		(uintptr_t)&_intr_ ## n,\
 		KERNEL64_CS,		\
 		0,			\
@@ -137,7 +137,7 @@
 	},
 
 #define USER_TRAP(n, name) \
-	[n] {				\
+	[n] = {				\
 		(uintptr_t)&name,	\
 		KERNEL64_CS,		\
 		0,			\
@@ -173,7 +173,7 @@ extern uint32_t		low_eintstack[];	/* top */
  */
 cpu_data_t	cpu_data_master = {
 	.cpu_this = &cpu_data_master,
-	.cpu_nanotime = &rtc_nanotime_info,
+	.cpu_nanotime = &pal_rtc_nanotime_info,
 	.cpu_int_stack_top = (vm_offset_t) low_eintstack,
 #ifdef __i386__
 	.cpu_is64bit = FALSE,
@@ -181,7 +181,7 @@ cpu_data_t	cpu_data_master = {
 	.cpu_is64bit = TRUE
 #endif
 };
-cpu_data_t	*cpu_data_ptr[MAX_CPUS] = { [0] &cpu_data_master };
+cpu_data_t	*cpu_data_ptr[MAX_CPUS] = { [0] = &cpu_data_master };
 
 decl_simple_lock_data(,ncpus_lock);	/* protects real_ncpus */
 unsigned int	real_ncpus = 1;
@@ -278,11 +278,7 @@ struct fake_descriptor64 kernel_ldt_desc64 = {
 struct fake_descriptor64 kernel_tss_desc64 = {
 	0,
 	sizeof(struct x86_64_tss)-1,
-#ifdef __x86_64__
-	SZ_G,
-#else
 	0,
-#endif
 	ACC_P|ACC_PL_K|ACC_TSS,
 	0
 };
@@ -386,21 +382,21 @@ fix_desc64(void *descp, int count)
 		case ACC_CALL_GATE:
 		case ACC_INTR_GATE:
 		case ACC_TRAP_GATE:
-			real.gate.offset_low16 = fakep->offset64 & 0xFFFF;
+			real.gate.offset_low16 = (uint16_t)(fakep->offset64 & 0xFFFF);
 			real.gate.selector16 = fakep->lim_or_seg & 0xFFFF;
 			real.gate.IST = fakep->size_or_IST & 0x7;
 			real.gate.access8 = fakep->access;
-			real.gate.offset_high16 = (fakep->offset64>>16)&0xFFFF;
+			real.gate.offset_high16 = (uint16_t)((fakep->offset64>>16) & 0xFFFF);
 			real.gate.offset_top32 = (uint32_t)(fakep->offset64>>32);
 			break;
 		default:	/* Otherwise */
 			real.desc.limit_low16 = fakep->lim_or_seg & 0xFFFF;
-			real.desc.base_low16 = fakep->offset64 & 0xFFFF;
-			real.desc.base_med8 = (fakep->offset64 >> 16) & 0xFF;
+			real.desc.base_low16 = (uint16_t)(fakep->offset64 & 0xFFFF);
+			real.desc.base_med8 = (uint8_t)((fakep->offset64 >> 16) & 0xFF);
 			real.desc.access8 = fakep->access;
 			real.desc.limit_high4 = (fakep->lim_or_seg >> 16) & 0xFF;
 			real.desc.granularity4 = fakep->size_or_IST;
-			real.desc.base_high8 = (fakep->offset64 >> 24) & 0xFF;
+			real.desc.base_high8 = (uint8_t)((fakep->offset64 >> 24) & 0xFF);
 			real.desc.base_top32 = (uint32_t)(fakep->offset64>>32);
 		}
 
@@ -539,13 +535,13 @@ cpu_desc_init(cpu_data_t *cdp)
 		cdt->gdt[sel_idx(CPU_DATA_GS)].offset = (vm_offset_t) cdp;
 		fix_desc(&cdt->gdt[sel_idx(CPU_DATA_GS)], 1);
 
-#if	MACH_KDB
+#if	MACH_KDB /* this only works for legacy 32-bit machines */
 		cdt->gdt[sel_idx(DEBUG_TSS)] = tss_desc_pattern;
 		cdt->gdt[sel_idx(DEBUG_TSS)].offset = (vm_offset_t) cdi->cdi_dbtss;
 		fix_desc(&cdt->gdt[sel_idx(DEBUG_TSS)], 1);
 
 		cdt->dbtss.esp0 = (int)(db_task_stack_store +
-				(INTSTACK_SIZE * (cdp->cpu_number)) - sizeof (natural_t));
+				(INTSTACK_SIZE * (cdp->cpu_number + 1)) - sizeof (natural_t));
 		cdt->dbtss.esp = cdt->dbtss.esp0;
 		cdt->dbtss.eip = (int)&db_task_start;
 #endif	/* MACH_KDB */
@@ -569,8 +565,6 @@ cpu_desc_init64(cpu_data_t *cdp)
 		/*
 		 * Master CPU uses the tables built at boot time.
 		 * Just set the index pointers to the low memory space.
-		 * Note that in 64-bit mode these are addressed in the
-		 * double-mapped window (uber-space).
 		 */
 		cdi->cdi_ktss = (void *)&master_ktss64;
 		cdi->cdi_sstk = (vm_offset_t) &master_sstk.top;
@@ -604,8 +598,7 @@ cpu_desc_init64(cpu_data_t *cdp)
 		cpu_desc_table64_t	*cdt = (cpu_desc_table64_t *) cdp->cpu_desc_tablep;
 		/*
 		 * Per-cpu GDT, IDT, KTSS descriptors are allocated in kernel 
-		 * heap (cpu_desc_table) . 
-		 * On K32 they're double-mapped in uber-space (over 4GB).
+		 * heap (cpu_desc_table). 
 		 * LDT descriptors are mapped into a separate area.
 		 */
 		cdi->cdi_gdt.ptr  = (struct fake_descriptor *)cdt->gdt;
@@ -641,7 +634,8 @@ cpu_desc_init64(cpu_data_t *cdp)
 			kernel_tss_desc64;
 		fix_desc64(&cdt->gdt[sel_idx(KERNEL_TSS)], 1);
 
-		/* Set double-fault stack as IST1 */
+		/* Set (zeroed) double-fault stack as IST1 */
+		bzero((void *) cdt->dfstk, sizeof(cdt->dfstk));
 		cdt->ktss.ist1 = UBER64((unsigned long)cdt->dfstk + sizeof(cdt->dfstk));
 #ifdef __i386__
 		cdt->gdt[sel_idx(CPU_DATA_GS)] = cpudata_desc_pattern;
@@ -694,7 +688,7 @@ cpu_desc_load64(cpu_data_t *cdp)
 	 *
  	 * Refer to commpage/cpu_number.s for the IDT limit trick.
 	 */
-	gdtptr64.length = GDTSZ * sizeof(struct real_descriptor64) - 1;
+	gdtptr64.length = GDTSZ * sizeof(struct real_descriptor) - 1;
 	gdtptr64.offset[0] = (uint32_t) cdi->cdi_gdt.ptr;
 	gdtptr64.offset[1] = KERNEL_UBER_BASE_HI32;
 	idtptr64.length = 0x1000 + cdp->cpu_number;
@@ -707,7 +701,7 @@ cpu_desc_load64(cpu_data_t *cdp)
 	ml_load_desc64();
 #else
 	/* Load the GDT, LDT, IDT and TSS */
-	cdi->cdi_gdt.size = sizeof(struct real_descriptor64)*GDTSZ - 1;
+	cdi->cdi_gdt.size = sizeof(struct real_descriptor)*GDTSZ - 1;
 	cdi->cdi_idt.size = 0x1000 + cdp->cpu_number;
 	lgdt((unsigned long *) &cdi->cdi_gdt);
 	lidt((unsigned long *) &cdi->cdi_idt);
@@ -781,6 +775,7 @@ fast_syscall_init64(__unused cpu_data_t *cdp)
 #endif
 }
 
+
 cpu_data_t *
 cpu_data_alloc(boolean_t is_boot_cpu)
 {
@@ -796,8 +791,6 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 #if NCOPY_WINDOWS > 0
 			cdp->cpu_pmap = pmap_cpu_alloc(TRUE);
 #endif
-			queue_init(&cdp->rtclock_timer.queue);
-			cdp->rtclock_timer.deadline = EndOfAllTime;
 		}
 		return cdp;
 	}
@@ -828,7 +821,6 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 	}
 	bzero((void*) cdp->cpu_int_stack_top, INTSTACK_SIZE);
 	cdp->cpu_int_stack_top += INTSTACK_SIZE;
-
 
 	/*
 	 * Allocate descriptor table:
@@ -866,9 +858,7 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 	real_ncpus++;
 	simple_unlock(&ncpus_lock);
 
-	cdp->cpu_nanotime = &rtc_nanotime_info;
-	queue_init(&cdp->rtclock_timer.queue);
-	cdp->rtclock_timer.deadline = EndOfAllTime;
+	cdp->cpu_nanotime = &pal_rtc_nanotime_info;
 
 	kprintf("cpu_data_alloc(%d) %p desc_table: %p "
 		"ldt: %p "
@@ -892,6 +882,64 @@ abort:
 }
 
 boolean_t
+valid_user_data_selector(uint16_t selector)
+{
+    sel_t	sel = selector_to_sel(selector);
+    
+    if (selector == 0)
+    	return (TRUE);
+
+    if (sel.ti == SEL_LDT)
+	return (TRUE);
+    else if (sel.index < GDTSZ) {
+	if ((gdt_desc_p(selector)->access & ACC_PL_U) == ACC_PL_U)
+	    return (TRUE);
+    }
+		
+    return (FALSE);
+}
+
+boolean_t
+valid_user_code_selector(uint16_t selector)
+{
+    sel_t	sel = selector_to_sel(selector);
+    
+    if (selector == 0)
+    	return (FALSE);
+
+    if (sel.ti == SEL_LDT) {
+	if (sel.rpl == USER_PRIV)
+	    return (TRUE);
+    }
+    else if (sel.index < GDTSZ && sel.rpl == USER_PRIV) {
+	if ((gdt_desc_p(selector)->access & ACC_PL_U) == ACC_PL_U)
+	    return (TRUE);
+    }
+
+    return (FALSE);
+}
+
+boolean_t
+valid_user_stack_selector(uint16_t selector)
+{
+    sel_t	sel = selector_to_sel(selector);
+    
+    if (selector == 0)
+    	return (FALSE);
+
+    if (sel.ti == SEL_LDT) {
+	if (sel.rpl == USER_PRIV)
+	    return (TRUE);
+    }
+    else if (sel.index < GDTSZ && sel.rpl == USER_PRIV) {
+	if ((gdt_desc_p(selector)->access & ACC_PL_U) == ACC_PL_U)
+	    return (TRUE);
+    }
+		
+    return (FALSE);
+}
+
+boolean_t
 valid_user_segment_selectors(uint16_t cs,
 		uint16_t ss,
 		uint16_t ds,
@@ -906,7 +954,6 @@ valid_user_segment_selectors(uint16_t cs,
 		valid_user_data_selector(fs)  &&
 		valid_user_data_selector(gs);
 }
-
 
 #if NCOPY_WINDOWS > 0
 
@@ -960,6 +1007,10 @@ cpu_userwindow_init(int cpu)
  	user_window = user_window_base + (cpu * NCOPY_WINDOWS * NBPDE);
 
 	cdp->cpu_copywindow_base = user_window;
+	/*
+	 * Abuse this pdp entry, the pdp now actually points to 
+	 * an array of copy windows addresses.
+	 */
 	cdp->cpu_copywindow_pdp  = pmap_pde(kernel_pmap, user_window);
 
 #ifdef __i386__
@@ -1011,7 +1062,7 @@ void
 cpu_mode_init(cpu_data_t *cdp)
 {
 #ifdef __i386__
-	if (cpu_mode_is64bit()) {
+	if (cdp->cpu_is64bit) {
 		cpu_IA32e_enable(cdp);
 		cpu_desc_load64(cdp);
 		fast_syscall_init64(cdp);

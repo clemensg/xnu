@@ -63,9 +63,18 @@ struct cat_desc {
 	const u_int8_t * cd_nameptr; /* pointer to cnode name */
 };
 
-/* cd_flags */
+/* cd_flags
+ *
+ * CD_EOF is used by hfs_vnop_readdir / cat_getdirentries to indicate EOF was
+ * encountered during a directory enumeration.  When this flag is observed
+ * on the next call to hfs_vnop_readdir it tells the caller that there's no
+ * need to descend into the catalog as EOF was encountered during the last call.
+ * This flag should only be set on the descriptor embedded in the directoryhint. 
+ */
+
 #define	CD_HASBUF	0x01	/* allocated filename buffer */
 #define CD_DECOMPOSED	0x02	/* name is fully decomposed */
+#define CD_EOF		0x04	/* see above */
 #define	CD_ISMETA	0x40	/* describes a metadata file */
 #define	CD_ISDIR	0x80	/* describes a directory */
 
@@ -249,6 +258,11 @@ union CatalogRecord {
 };
 typedef union CatalogRecord  CatalogRecord;
 
+/* Constants for HFS fork types */
+enum {
+	kHFSDataForkType = 0x0, 	/* data fork */
+	kHFSResourceForkType = 0xff	/* resource fork */
+};
 
 /*
  * Catalog Interface
@@ -395,7 +409,7 @@ enum {
 extern int cat_deletelink( struct hfsmount *hfsmp,
                            struct cat_desc *descp);
 
-extern int cat_updatelink( struct hfsmount *hfsmp,
+extern int cat_update_siblinglinks( struct hfsmount *hfsmp,
                            cnid_t linkfileid,
                            cnid_t prevlinkid,
                            cnid_t nextlinkid);
@@ -406,11 +420,23 @@ extern int cat_lookuplink( struct hfsmount *hfsmp,
                            cnid_t *prevlinkid,
                            cnid_t *nextlinkid);
 
-extern int cat_lookuplinkbyid( struct hfsmount *hfsmp,
+extern int cat_lookup_siblinglinks( struct hfsmount *hfsmp,
                                cnid_t linkfileid,
                                cnid_t *prevlinkid,
                                cnid_t *nextlinkid);
 
+extern int cat_lookup_dirlink(struct hfsmount *hfsmp, 
+			     cnid_t dirlink_id, 
+			     u_int8_t forktype, 
+			     struct cat_desc *outdescp, 
+			     struct cat_attr *attrp, 
+			     struct cat_fork *forkp);
+
+extern int cat_update_dirlink(struct hfsmount *hfsmp, 
+			      u_int8_t forktype, 
+			      struct cat_desc *descp, 
+			      struct cat_attr *attrp, 
+			      struct cat_fork *rsrcforkp);
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* KERNEL */

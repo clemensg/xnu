@@ -99,27 +99,23 @@ struct fileproc {
 #define FP_INCREATE 	0x0001
 #define FP_INCLOSE 	0x0002
 #define FP_INSELECT	0x0004
-/*
- * see <rdar://problem/6647955>
- */
-#if CONFIG_EMBEDDED
-#define FP_INCHRREAD	0x0000
-#else
-#define FP_INCHRREAD	0x0008
-#endif
+#define FP_INCHRREAD	0x0000	/* disable FP_INCHRREAD <rdar://6986929> */
 #define FP_WRITTEN	0x0010
 #define FP_CLOSING	0x0020
 #define FP_WAITCLOSE	0x0040
 #define FP_AIOISSUED	0x0080
 #define FP_WAITEVENT	0x0100
+#define FP_SELCONFLICT	0x0200	/* select conflict on an individual fp */
 
-#define FP_VALID_FLAGS (FP_INCREATE | FP_INCLOSE | FP_INSELECT | FP_INCHRREAD | FP_WRITTEN | FP_WRITTEN | FP_CLOSING | FP_WAITCLOSE | FP_AIOISSUED | FP_WAITEVENT)
+#define FP_VALID_FLAGS (FP_INCREATE | FP_INCLOSE | FP_INSELECT | FP_INCHRREAD | FP_WRITTEN | FP_CLOSING | FP_WAITCLOSE | FP_AIOISSUED | FP_WAITEVENT | FP_SELCONFLICT)
 
 
 #ifndef _KAUTH_CRED_T
 #define	_KAUTH_CRED_T
 struct ucred;
 typedef struct ucred *kauth_cred_t;
+struct posix_cred;
+typedef struct posix_cred *posix_cred_t;
 #endif	/* !_KAUTH_CRED_T */
 
 /* file types */
@@ -139,6 +135,8 @@ typedef enum {
 #define FG_WINSMSGQ	0x04 	/* wait for the fielglob is in msgque */
 #define FG_RMMSGQ	0x08 	/* the fileglob is being removed from msgqueue */
 #define FG_WRMMSGQ	0x10 	/* wait for the fileglob to  be removed from msgqueue */
+#define FG_PORTMADE	0x20	/* a port was at some point created for this fileglob */
+#define FG_NOSIGPIPE	0x40	/* don't deliver SIGPIPE with EPIPE return */
 
 struct fileglob {
 	LIST_ENTRY(fileglob) f_list;/* list of active files */
@@ -165,11 +163,9 @@ struct fileglob {
 		int	(*fo_drain)	(struct fileproc *fp, vfs_context_t ctx);
 	} *fg_ops;
 	off_t	fg_offset;
-	caddr_t	fg_data;		/* vnode or socket or SHM or semaphore */
+	void 	*fg_data;		/* vnode or socket or SHM or semaphore */
 	lck_mtx_t fg_lock;
 	int32_t fg_lflags;		/* file global flags */
-	unsigned int fg_lockpc[4];
-	unsigned int fg_unlockpc[4];
 #if CONFIG_MACF
 	struct label *fg_label;  /* JMM - use the one in the cred? */
 #endif

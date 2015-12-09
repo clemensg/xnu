@@ -162,6 +162,12 @@ MACRO_BEGIN								\
 	assert((kmsg)->ikm_next == IKM_BOGUS);				\
 MACRO_END
 
+#define ikm_set_header(kmsg, mtsize)					\
+MACRO_BEGIN								\
+	(kmsg)->ikm_header = (mach_msg_header_t *) 			\
+	((vm_offset_t)((kmsg) + 1) + (kmsg)->ikm_size - (mtsize));	\
+MACRO_END
+
 struct ipc_kmsg_queue {
 	struct ipc_kmsg *ikmq_base;
 };
@@ -263,17 +269,23 @@ extern void ipc_kmsg_free(
 extern void ipc_kmsg_destroy(
 	ipc_kmsg_t	kmsg);
 
-/* destroy kernel message and a reference on the dest */
-extern void ipc_kmsg_destroy_dest(
-	ipc_kmsg_t	kmsg);
+/* Enqueue kernel message for deferred destruction */
+extern boolean_t ipc_kmsg_delayed_destroy(
+	ipc_kmsg_t kmsg);
 
+/* Process all the delayed message destroys */
+extern void ipc_kmsg_reap_delayed(void);
 
 /* Preallocate a kernel message buffer */
+extern ipc_kmsg_t ipc_kmsg_prealloc(
+	mach_msg_size_t	size);
+
+/* bind a preallocated message buffer to a port */
 extern void ipc_kmsg_set_prealloc(
 	ipc_kmsg_t	kmsg,
 	ipc_port_t	port);
 
-/* Clear a kernel message buffer */
+/* Clear preallocated message buffer binding */
 extern void ipc_kmsg_clear_prealloc(
 	ipc_kmsg_t	kmsg,
 	ipc_port_t	port);
@@ -312,29 +324,28 @@ extern void ipc_kmsg_put_to_kernel(
 extern mach_msg_return_t ipc_kmsg_copyin_header(
 	mach_msg_header_t	*msg,
 	ipc_space_t		space,
-	mach_port_name_t	notify);
+	boolean_t		notify);
 
 /* Copyin port rights and out-of-line memory from a user message */
 extern mach_msg_return_t ipc_kmsg_copyin(
 	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	vm_map_t		map,
-	mach_port_name_t	notify);
+	boolean_t		notify);
 
 /* Copyin port rights and out-of-line memory from a kernel message */
-extern void ipc_kmsg_copyin_from_kernel(
+extern mach_msg_return_t ipc_kmsg_copyin_from_kernel(
 	ipc_kmsg_t		kmsg);
 
 #if IKM_SUPPORT_LEGACY
-extern void ipc_kmsg_copyin_from_kernel_legacy(
+extern mach_msg_return_t ipc_kmsg_copyin_from_kernel_legacy(
 	ipc_kmsg_t	kmsg);
 #endif
 
 /* Copyout port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyout_header(
 	mach_msg_header_t	*msg,
-	ipc_space_t		space,
-	mach_port_name_t	notify);
+	ipc_space_t		space);
 
 /* Copyout a port right returning a name */
 extern mach_msg_return_t ipc_kmsg_copyout_object(
@@ -348,7 +359,6 @@ extern mach_msg_return_t ipc_kmsg_copyout(
 	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	vm_map_t		map,
-	mach_port_name_t	notify,
 	mach_msg_body_t		*slist);
 
 /* Copyout port rights and out-of-line memory from the body of a message */
