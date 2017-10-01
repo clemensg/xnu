@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -168,10 +168,7 @@ public:
     @discussion systemPowerEventOccurred is a richer alternative to receivePowerNotification()
         Only Apple-owned kexts should have reason to call systemPowerEventOccurred.
     @param event An OSSymbol describing the type of power event.
-    @param value A 32-bit integer value associated with the event.
-    @param shouldUpdate indicates whether the root domain should send a notification
-        to interested parties. Pass false if you're calling systemPowerEventOccurred
-        several times in succession; and pass true only on the last invocatino.
+    @param intValue A 32-bit integer value associated with the event.
     @result kIOReturnSuccess on success */
 
     IOReturn            systemPowerEventOccurred(
@@ -339,7 +336,7 @@ public:
 
 /*! @function createPMAssertion
     @abstract Creates an assertion to influence system power behavior.
-    @param whichAssertionBits A bitfield specify the assertion that the caller requests.
+    @param whichAssertionsBits A bitfield specify the assertion that the caller requests.
     @param assertionLevel An integer detailing the initial assertion level, kIOPMDriverAssertionLevelOn
         or kIOPMDriverAssertionLevelOff.
     @param ownerService A pointer to the caller's IOService class, for tracking.
@@ -507,13 +504,15 @@ public:
 
     bool        activitySinceSleep(void);
     bool        abortHibernation(void);
+    void        updateConsoleUsers(void);
 
     IOReturn    joinAggressiveness( IOService * service );
     void        handleAggressivesRequests( void );
 
+    void        kdebugTrace(uint32_t event, uint64_t regId,
+                            uintptr_t param1, uintptr_t param2, uintptr_t param3 = 0);
     void        tracePoint( uint8_t point );
-    void        tracePoint( uint8_t point, uint8_t data );
-    void        traceDetail( uint32_t data32 );
+    void        traceDetail(uint32_t msgType, uint32_t msgIndex, uintptr_t handler);
 
     bool        systemMessageFilter(
                     void * object, void * arg1, void * arg2, void * arg3 );
@@ -535,7 +534,7 @@ public:
                                 const char          *name,
                                 int                 messageType,
                                 uint32_t            delay_ms,
-                                int                 app_pid,
+                                uint64_t            id,
                                 OSObject            *object,
                                 IOPMPowerStateIndex ps=0);
 
@@ -553,6 +552,8 @@ public:
     bool        sleepWakeDebugIsWdogEnabled();
     static void saveTimeoutAppStackShot(void *p0, void *p1);
     void        sleepWakeDebugSaveSpinDumpFile();
+    void        swdDebugSetup();
+    void        swdDebugTeardown();
 
 private:
     friend class PMSettingObject;
@@ -647,7 +648,8 @@ private:
     thread_call_t           extraSleepTimer;
     thread_call_t           diskSyncCalloutEntry;
     thread_call_t           fullWakeThreadCall;
-    thread_call_t           hibDebugSetupEntry;
+    thread_call_t           swdDebugSetupEntry;
+    thread_call_t           swdDebugTearDownEntry;
     thread_call_t           updateConsoleUsersEntry;
 
     // Track system capabilities.
@@ -718,6 +720,7 @@ private:
     unsigned int            toldPowerdCapWillChange :1;
     unsigned int            displayPowerOnRequested:1;
 
+    uint8_t                 tasksSuspended;
     uint32_t                hibernateMode;
     AbsoluteTime            userActivityTime;
     AbsoluteTime            userActivityTime_prev;
@@ -726,6 +729,8 @@ private:
     uint32_t                lastSleepReason;
     uint32_t                fullToDarkReason;
     uint32_t                hibernateAborted;
+    uint8_t                 standbyNixed;
+    uint8_t                 resetTimers;
 
     enum FullWakeReason {
         kFullWakeReasonNone = 0,
@@ -748,7 +753,6 @@ private:
     OSData *                aggressivesData;
 
     AbsoluteTime            userBecameInactiveTime;
-    AbsoluteTime            systemWakeTime;
 
     // PCI top-level PM trace
     IOService *             pciHostBridgeDevice;
@@ -776,8 +780,11 @@ private:
 #endif
     volatile uint32_t   swd_lock;    /* Lock to access swd_buffer & and its header */
     void  *             swd_buffer;  /* Memory allocated for dumping sleep/wake logs */
-    uint8_t             swd_flags;   /* Flags defined in IOPMPrivate.h */
+    uint32_t            swd_flags;   /* Flags defined in IOPMPrivate.h */
+    uint8_t             swd_DebugImageSetup;
     void  *             swd_spindump_buffer;
+
+    IOBufferMemoryDescriptor    *swd_memDesc;
 
     IOMemoryMap  *      swd_logBufMap; /* Memory with sleep/wake logs from previous boot */
 
@@ -843,7 +850,7 @@ private:
 
     void        deregisterPMSettingObject( PMSettingObject * pmso );
 
-    void        checkForValidDebugData(const char *fname, vfs_context_t *ctx, 
+    uint32_t    checkForValidDebugData(const char *fname, vfs_context_t *ctx, 
                                             void *tmpBuf, struct vnode **vp);
     void        sleepWakeDebugMemAlloc( );
     void        sleepWakeDebugSpinDumpMemAlloc( );

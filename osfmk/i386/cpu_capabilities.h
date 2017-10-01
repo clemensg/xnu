@@ -71,6 +71,8 @@
 #define	kHasHLE			0x0000000200000000ULL
 #define	kHasRDSEED		0x0000000800000000ULL
 #define	kHasADX			0x0000000400000000ULL
+#define	kHasMPX			0x0000001000000000ULL
+#define	kHasSGX			0x0000002000000000ULL
 
 
 #ifndef	__ASSEMBLER__
@@ -80,7 +82,7 @@ __BEGIN_DECLS
 extern uint64_t  _get_cpu_capabilities( void );
 __END_DECLS
 
-inline static
+__inline static
 int _NumCPUs( void )
 {
 	return (int) (_get_cpu_capabilities() & kNumCPUs) >> kNumCPUsShift;
@@ -198,10 +200,14 @@ int _NumCPUs( void )
 #define _COMM_PAGE_GTOD_GENERATION	(_COMM_PAGE_START_ADDRESS+0x06c)	/* used by gettimeofday() */
 #define _COMM_PAGE_GTOD_NS_BASE		(_COMM_PAGE_START_ADDRESS+0x070)	/* used by gettimeofday() */
 #define _COMM_PAGE_GTOD_SEC_BASE	(_COMM_PAGE_START_ADDRESS+0x078)	/* used by gettimeofday() */
+ 
 /* NOTE: APPROX_TIME must be aligned to 64-byte cache line size: */
 #define _COMM_PAGE_APPROX_TIME		(_COMM_PAGE_START_ADDRESS+0x080)	/* used by mach_approximate_time() */
 #define _COMM_PAGE_APPROX_TIME_SUPPORTED (_COMM_PAGE_START_ADDRESS+0x088)	/* used by mach_approximate_time() */
 
+/* Align following entries to next cache line */
+#define _COMM_PAGE_CONT_TIMEBASE	(_COMM_PAGE_START_ADDRESS+0x0C0)	/* used by mach_continuous_time() */
+#define _COMM_PAGE_BOOTTIME_USEC	(_COMM_PAGE_START_ADDRESS+0x0C8)	/* uint64_t boottime */
 
 #define _COMM_PAGE_END			(_COMM_PAGE_START_ADDRESS+0xfff)	/* end of common page */
 

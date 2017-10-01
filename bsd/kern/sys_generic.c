@@ -146,7 +146,6 @@ void evpipefree(struct pipe *);
 void postpipeevent(struct pipe *, int);
 void postevent(struct socket *, struct sockbuf *, int);
 extern kern_return_t IOBSDGetPlatformUUID(__darwin_uuid_t uuid, mach_timespec_t timeoutp);
-extern void delay(int);
 
 int rd_uio(struct proc *p, int fdes, uio_t uio, user_ssize_t *retval);
 int wr_uio(struct proc *p, struct fileproc *fp, uio_t uio, user_ssize_t *retval);
@@ -171,7 +170,7 @@ void select_waitq_init(void);
 void
 select_waitq_init(void)
 {
-	waitq_init(&select_conflict_queue, SYNC_POLICY_FIFO | SYNC_POLICY_DISABLE_IRQ);
+	waitq_init(&select_conflict_queue, SYNC_POLICY_FIFO);
 }
 
 #define f_flag f_fglob->fg_flag
@@ -940,6 +939,7 @@ static int selscan(struct proc *p, struct _select * sel, struct _select_data * s
 static int selcount(struct proc *p, u_int32_t *ibits, int nfd, int *count);
 static int seldrop_locked(struct proc *p, u_int32_t *ibits, int nfd, int lim, int *need_wakeup, int fromselcount);
 static int seldrop(struct proc *p, u_int32_t *ibits, int nfd);
+static int select_internal(struct proc *p, struct select_nocancel_args *uap, uint64_t timeout, int32_t *retval);
 
 /*
  * Select system call.
@@ -947,17 +947,126 @@ static int seldrop(struct proc *p, u_int32_t *ibits, int nfd);
  * Returns:	0			Success
  *		EINVAL			Invalid argument
  *		EAGAIN			Nonconformant error if allocation fails
- *	selprocess:???
  */
 int
 select(struct proc *p, struct select_args *uap, int32_t *retval)
 {
 	__pthread_testcancel(1);
-	return(select_nocancel(p, (struct select_nocancel_args *)uap, retval));
+	return select_nocancel(p, (struct select_nocancel_args *)uap, retval);
 }
 
 int
 select_nocancel(struct proc *p, struct select_nocancel_args *uap, int32_t *retval)
+{
+	uint64_t timeout = 0;
+
+	if (uap->tv) {
+		int err;
+		struct timeval atv;
+		if (IS_64BIT_PROCESS(p)) {
+			struct user64_timeval atv64;
+			err = copyin(uap->tv, (caddr_t)&atv64, sizeof(atv64));
+			/* Loses resolution - assume timeout < 68 years */
+			atv.tv_sec = atv64.tv_sec;
+			atv.tv_usec = atv64.tv_usec;
+		} else {
+			struct user32_timeval atv32;
+			err = copyin(uap->tv, (caddr_t)&atv32, sizeof(atv32));
+			atv.tv_sec = atv32.tv_sec;
+			atv.tv_usec = atv32.tv_usec;
+		}
+		if (err)
+			return err;
+
+		if (itimerfix(&atv)) {
+			err = EINVAL;
+			return err;
+		}
+
+		clock_absolutetime_interval_to_deadline(tvtoabstime(&atv), &timeout);
+	}
+
+	return select_internal(p, uap, timeout, retval);
+}
+
+int
+pselect(struct proc *p, struct pselect_args *uap, int32_t *retval)
+{
+	__pthread_testcancel(1);
+	return pselect_nocancel(p, (struct pselect_nocancel_args *)uap, retval);
+}
+
+int
+pselect_nocancel(struct proc *p, struct pselect_nocancel_args *uap, int32_t *retval)
+{
+	int err;
+	struct uthread *ut;
+	uint64_t timeout = 0;
+
+	if (uap->ts) {
+		struct timespec ts;
+
+		if (IS_64BIT_PROCESS(p)) {
+			struct user64_timespec ts64;
+			err = copyin(uap->ts, (caddr_t)&ts64, sizeof(ts64));
+			ts.tv_sec = ts64.tv_sec;
+			ts.tv_nsec = ts64.tv_nsec;
+		} else {
+			struct user32_timespec ts32;
+			err = copyin(uap->ts, (caddr_t)&ts32, sizeof(ts32));
+			ts.tv_sec = ts32.tv_sec;
+			ts.tv_nsec = ts32.tv_nsec;
+		}
+		if (err) {
+			return err;
+		}
+
+		if (!timespec_is_valid(&ts)) {
+			return EINVAL;
+		}
+		clock_absolutetime_interval_to_deadline(tstoabstime(&ts), &timeout);
+	}
+
+	ut = get_bsdthread_info(current_thread());
+
+	if (uap->mask != USER_ADDR_NULL) {
+		/* save current mask, then copyin and set new mask */
+		sigset_t newset;
+		err = copyin(uap->mask, &newset, sizeof(sigset_t));
+		if (err) {
+			return err;
+		}
+		ut->uu_oldmask = ut->uu_sigmask;
+		ut->uu_flag |= UT_SAS_OLDMASK;
+		ut->uu_sigmask = (newset & ~sigcantmask);
+	}
+
+	err = select_internal(p, (struct select_nocancel_args *)uap, timeout, retval);
+
+	if (err != EINTR && ut->uu_flag & UT_SAS_OLDMASK) {
+		/*
+		 * Restore old mask (direct return case). NOTE: EINTR can also be returned
+		 * if the thread is cancelled. In that case, we don't reset the signal
+		 * mask to its original value (which usually happens in the signal
+		 * delivery path). This behavior is permitted by POSIX.
+		 */
+		ut->uu_sigmask = ut->uu_oldmask;
+		ut->uu_oldmask = 0;
+		ut->uu_flag &= ~UT_SAS_OLDMASK;
+	}
+
+	return err;
+}
+
+/*
+ * Generic implementation of {,p}select. Care: we type-pun uap across the two
+ * syscalls, which differ slightly. The first 4 arguments (nfds and the fd sets)
+ * are identical. The 5th (timeout) argument points to different types, so we
+ * unpack in the syscall-specific code, but the generic code still does a null
+ * check on this argument to determine if a timeout was specified.
+ */
+static int
+select_internal(struct proc *p, struct select_nocancel_args *uap, uint64_t timeout, int32_t *retval)
 {
 	int error = 0;
 	u_int ni, nw;
@@ -1049,32 +1158,7 @@ select_nocancel(struct proc *p, struct select_nocancel_args *uap, int32_t *retva
 	getbits(ex, 2);
 #undef	getbits
 
-	if (uap->tv) {
-		struct timeval atv;
-		if (IS_64BIT_PROCESS(p)) {
-			struct user64_timeval atv64;
-			error = copyin(uap->tv, (caddr_t)&atv64, sizeof(atv64));
-			/* Loses resolution - assume timeout < 68 years */
-			atv.tv_sec = atv64.tv_sec;
-			atv.tv_usec = atv64.tv_usec;
-		} else {
-			struct user32_timeval atv32;
-			error = copyin(uap->tv, (caddr_t)&atv32, sizeof(atv32));
-			atv.tv_sec = atv32.tv_sec;
-			atv.tv_usec = atv32.tv_usec;
-		}
-		if (error)
-			goto continuation;
-		if (itimerfix(&atv)) {
-			error = EINVAL;
-			goto continuation;
-		}
-
-		clock_absolutetime_interval_to_deadline(
-										tvtoabstime(&atv), &seldata->abstime);
-	}
-	else
-		seldata->abstime = 0;
+	seldata->abstime = timeout;
 
 	if ( (error = selcount(p, sel->ibits, uap->nd, &count)) ) {
 			goto continuation;
@@ -1119,12 +1203,12 @@ select_nocancel(struct proc *p, struct select_nocancel_args *uap, int32_t *retva
 			panic("can't allocate %ld bytes for wqstate buffer",
 			      uth->uu_wqstate_sz);
 		waitq_set_init(uth->uu_wqset,
-			       SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST|SYNC_POLICY_DISABLE_IRQ, NULL);
+			       SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST, NULL, NULL);
 	}
 
 	if (!waitq_set_is_valid(uth->uu_wqset))
 		waitq_set_init(uth->uu_wqset,
-			       SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST|SYNC_POLICY_DISABLE_IRQ, NULL);
+			       SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST, NULL, NULL);
 
 	/* the last chunk of our buffer is an array of waitq pointers */
 	seldata->wqp = (uint64_t *)((char *)(uth->uu_wqset) + ALIGN(sizeof(struct waitq_set)));
@@ -1306,6 +1390,14 @@ done:
 		putbits(ex, 2);
 #undef putbits
 	}
+
+	if (error != EINTR && sel_pass == SEL_SECONDPASS && uth->uu_flag & UT_SAS_OLDMASK) {
+		/* restore signal mask - continuation case */
+		uth->uu_sigmask = uth->uu_oldmask;
+		uth->uu_oldmask = 0;
+		uth->uu_flag &= ~UT_SAS_OLDMASK;
+	}
+
 	return(error);
 }
 
@@ -1598,7 +1690,7 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 	    (nfds > p->p_rlimit[RLIMIT_NOFILE].rlim_cur && (proc_suser(p) || nfds > FD_SETSIZE)))
 		return (EINVAL);
 
-	kq = kqueue_alloc(p);
+	kq = kqueue_alloc(p, 0);
 	if (kq == NULL)
 		return (EAGAIN);
 
@@ -1635,7 +1727,6 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 	OSBitOrAtomic(P_SELECT, &p->p_flag);
 	for (i = 0; i < nfds; i++) {
 		short events = fds[i].events;
-		int kerror = 0;
 
 		/* per spec, ignore fd values below zero */
 		if (fds[i].fd < 0) {
@@ -1654,19 +1745,19 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 			kev.filter = EVFILT_READ;
 			if (events & ( POLLPRI | POLLRDBAND ))
 				kev.flags |= EV_OOBAND;
-			kerror = kevent_register(kq, &kev, p);
+			kevent_register(kq, &kev, p);
 		}
 
 		/* Handle output events */
-		if (kerror == 0 &&
-		    events & ( POLLOUT | POLLWRNORM | POLLWRBAND )) {
+		if ((kev.flags & EV_ERROR) == 0 &&
+		    (events & ( POLLOUT | POLLWRNORM | POLLWRBAND ))) {
 			kev.filter = EVFILT_WRITE;
-			kerror = kevent_register(kq, &kev, p);
+			kevent_register(kq, &kev, p);
 		}
 
 		/* Handle BSD extension vnode events */
-		if (kerror == 0 &&
-		    events & ( POLLEXTEND | POLLATTRIB | POLLNLINK | POLLWRITE )) {
+		if ((kev.flags & EV_ERROR) == 0 &&
+		    (events & ( POLLEXTEND | POLLATTRIB | POLLNLINK | POLLWRITE ))) {
 			kev.filter = EVFILT_VNODE;
 			kev.fflags = 0;
 			if (events & POLLEXTEND)
@@ -1677,10 +1768,10 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 				kev.fflags |= NOTE_LINK;
 			if (events & POLLWRITE)
 				kev.fflags |= NOTE_WRITE;
-			kerror = kevent_register(kq, &kev, p);
+			kevent_register(kq, &kev, p);
 		}
 
-		if (kerror != 0) {
+		if (kev.flags & EV_ERROR) {
 			fds[i].revents = POLLNVAL;
 			rfds++;
 		} else
@@ -1688,14 +1779,14 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 	}
 
 	/* Did we have any trouble registering? */
-	if (rfds > 0)
+	if (rfds == nfds)
 		goto done;
 
 	/* scan for, and possibly wait for, the kevents to trigger */
 	cont->pca_fds = uap->fds;
 	cont->pca_nfds = nfds;
 	cont->pca_rfds = rfds;
-	error = kqueue_scan(kq, poll_callback, NULL, cont, &atv, p);
+	error = kqueue_scan(kq, poll_callback, NULL, cont, NULL, &atv, p);
 	rfds = cont->pca_rfds;
 
  done:
@@ -2011,7 +2102,7 @@ selrecord(__unused struct proc *selector, struct selinfo *sip, void *s_data)
 		return;
 
 	if ((sip->si_flags & SI_INITED) == 0) {
-		waitq_init(&sip->si_waitq, SYNC_POLICY_FIFO | SYNC_POLICY_DISABLE_IRQ);
+		waitq_init(&sip->si_waitq, SYNC_POLICY_FIFO);
 		sip->si_flags |= SI_INITED;
 		sip->si_flags &= ~SI_CLEAR;
 	}
@@ -3070,6 +3161,9 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 	else if (args->cmd == LEDGER_LIMIT)
 		error = copyin(args->arg2, (char *)&lla, sizeof (lla));
 #endif
+	else if ((args->cmd < 0) || (args->cmd > LEDGER_MAX_CMD))
+		return (EINVAL);
+
 	if (error)
 		return (error);
 	if (len < 0)
@@ -3120,7 +3214,7 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 
 			rval = ledger_get_task_entry_info_multiple(task, &buf, &len);
 			proc_rele(proc);
-			if ((rval == 0) && (len > 0)) {
+			if ((rval == 0) && (len >= 0)) {
 				sz = len * sizeof (struct ledger_entry_info);
 				rval = copyout(buf, args->arg2, sz);
 				kfree(buf, sz);
@@ -3135,7 +3229,7 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 			int sz;
 
 			rval = ledger_template_info(&buf, &len);
-			if ((rval == 0) && (len > 0)) {
+			if ((rval == 0) && (len >= 0)) {
 				sz = len * sizeof (struct ledger_template_info);
 				rval = copyout(buf, args->arg1, sz);
 				kfree(buf, sz);
@@ -3146,6 +3240,8 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 		}
 
 		default:
+			panic("ledger syscall logic error -- command type %d", args->cmd);
+			proc_rele(proc);
 			rval = EINVAL;
 	}
 
@@ -3205,7 +3301,7 @@ static inline struct waitq_set *sysctl_get_wqset(int idx)
 	gwqs = (struct g_wqset *)kalloc(sizeof(*gwqs));
 	assert(gwqs != NULL);
 
-	gwqs->wqset = waitq_set_alloc(SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST|SYNC_POLICY_DISABLE_IRQ);
+	gwqs->wqset = waitq_set_alloc(SYNC_POLICY_FIFO|SYNC_POLICY_PREPOST, NULL);
 	enqueue_tail(&g_wqset_list, &gwqs->link);
 	printf("[WQ]: created new waitq set 0x%llx\n", wqset_id(gwqs->wqset));
 
@@ -3224,7 +3320,7 @@ static inline struct waitq *global_test_waitq(int idx)
 	if (!g_wq_init) {
 		g_wq_init = 1;
 		for (int i = 0; i < MAX_GLOBAL_TEST_QUEUES; i++)
-			waitq_init(&g_wq[i], SYNC_POLICY_FIFO|SYNC_POLICY_DISABLE_IRQ);
+			waitq_init(&g_wq[i], SYNC_POLICY_FIFO);
 	}
 
 	return &g_wq[idx % MAX_GLOBAL_TEST_QUEUES];

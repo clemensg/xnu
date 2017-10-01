@@ -383,7 +383,7 @@ SYSCTL_QUAD    (_hw, HW_MEMSIZE, memsize, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LO
 SYSCTL_INT     (_hw, OID_AUTO, packages, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &packages, 0, "");
 
 /*
- * Optional features can register nodes below hw.optional.
+ * Optional CPU features can register nodes below hw.optional.
  *
  * If the feature is not present, the node should either not be registered,
  * or it should return -1.  If the feature is present, the node should return
@@ -393,6 +393,11 @@ SYSCTL_INT     (_hw, OID_AUTO, packages, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOC
 SYSCTL_NODE(_hw, OID_AUTO, optional, CTLFLAG_RW|CTLFLAG_LOCKED, NULL, "optional features");
 
 SYSCTL_INT(_hw_optional, OID_AUTO, floatingpoint, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (int *)NULL, 1, "");	/* always set */
+
+/*
+ * Optional device hardware features can be registered by drivers below hw.features
+ */
+SYSCTL_NODE(_hw, OID_AUTO, features, CTLFLAG_RD | CTLFLAG_LOCKED, NULL, "hardware features");
 
 /*
  * Deprecated variables.  These are supported for backwards compatibility
@@ -459,6 +464,8 @@ SYSCTL_PROC(_hw_optional, OID_AUTO, bmi2,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KER
 SYSCTL_PROC(_hw_optional, OID_AUTO, rtm,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *) kHasRTM, 0, sysctl_cpu_capability, "I", "");
 SYSCTL_PROC(_hw_optional, OID_AUTO, hle,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *) kHasHLE, 0, sysctl_cpu_capability, "I", "");
 SYSCTL_PROC(_hw_optional, OID_AUTO, adx,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *) kHasADX, 0, sysctl_cpu_capability, "I", "");
+SYSCTL_PROC(_hw_optional, OID_AUTO, mpx,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *) kHasMPX, 0, sysctl_cpu_capability, "I", "");
+SYSCTL_PROC(_hw_optional, OID_AUTO, sgx,	CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (void *) kHasSGX, 0, sysctl_cpu_capability, "I", "");
 #else
 #error Unsupported arch
 #endif /* !__i386__ && !__x86_64 && !__arm__ && ! __arm64__ */

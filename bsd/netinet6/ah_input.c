@@ -1,8 +1,8 @@
 /*
- * Copyright (c) 2008-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- * 
+ *
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- * 
+ *
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
+ *
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- * 
+ *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
@@ -404,6 +404,7 @@ ah4_input(struct mbuf *m, int off)
 	if (ipsec4_tunnel_validate(m, off + stripsiz, nxt, sav, &ifamily)) {
 		ifaddr_t ifa;
 		struct sockaddr_storage addr;
+		struct sockaddr_in *ipaddr;
 
 		/*
 		 * strip off all the headers that precedes AH.
@@ -412,8 +413,9 @@ ah4_input(struct mbuf *m, int off)
 		 * XXX more sanity checks
 		 * XXX relationship with gif?
 		 */
-		u_int8_t tos;
-		
+		u_int8_t tos, otos;
+		int sum;
+
 		if (ifamily == AF_INET6) {
 			ipseclog((LOG_NOTICE, "ipsec tunnel protocol mismatch "
 			    "in IPv4 AH input: %s\n", ipsec_logsastr(sav)));
@@ -429,11 +431,21 @@ ah4_input(struct mbuf *m, int off)
 			}
 		}
 		ip = mtod(m, struct ip *);
+		otos = ip->ip_tos;
 		/* ECN consideration. */
 		if (ip_ecn_egress(ip4_ipsec_ecn, &tos, &ip->ip_tos) == 0) {
 			IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
 			goto fail;
 		}
+
+                if (otos != ip->ip_tos) {
+		    sum = ~ntohs(ip->ip_sum) & 0xffff;
+		    sum += (~otos & 0xffff) + ip->ip_tos;
+		    sum = (sum >> 16) + (sum & 0xffff);
+		    sum += (sum >> 16);  /* add carry */
+		    ip->ip_sum = htons(~sum & 0xffff);
+		} 
+
 		if (!key_checktunnelsanity(sav, AF_INET,
 			    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst)) {
 			ipseclog((LOG_NOTICE, "ipsec tunnel address mismatch "
@@ -474,21 +486,17 @@ ah4_input(struct mbuf *m, int off)
 			goto fail;
 		}
 
-		if (ip_doscopedroute) {
-			struct sockaddr_in *ipaddr;
+		bzero(&addr, sizeof(addr));
+		ipaddr = (__typeof__(ipaddr))&addr;
+		ipaddr->sin_family = AF_INET;
+		ipaddr->sin_len = sizeof(*ipaddr);
+		ipaddr->sin_addr = ip->ip_dst;
 
-			bzero(&addr, sizeof(addr));
-			ipaddr = (__typeof__(ipaddr))&addr;
-			ipaddr->sin_family = AF_INET;
-			ipaddr->sin_len = sizeof(*ipaddr);
-			ipaddr->sin_addr = ip->ip_dst;
-
-			// update the receiving interface address based on the inner address
-			ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
-			if (ifa) {
-				m->m_pkthdr.rcvif = ifa->ifa_ifp;
-				IFA_REMREF(ifa);
-			}
+		// update the receiving interface address based on the inner address
+		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
+		if (ifa) {
+			m->m_pkthdr.rcvif = ifa->ifa_ifp;
+			IFA_REMREF(ifa);
 		}
 		
 		// Input via IPSec interface
@@ -822,7 +830,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	if (ipsec6_tunnel_validate(m, off + stripsiz, nxt, sav, &ifamily)) {
 		ifaddr_t ifa;
 		struct sockaddr_storage addr;
-
+		struct sockaddr_in6 *ip6addr;
 		/*
 		 * strip off all the headers that precedes AH.
 		 *	IP6 xx AH IP6' payload -> IP6' payload
@@ -883,21 +891,17 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 			goto fail;
 		}
 
-		if (ip6_doscopedroute) {
-			struct sockaddr_in6 *ip6addr;
+		bzero(&addr, sizeof(addr));
+		ip6addr = (__typeof__(ip6addr))&addr;
+		ip6addr->sin6_family = AF_INET6;
+		ip6addr->sin6_len = sizeof(*ip6addr);
+		ip6addr->sin6_addr = ip6->ip6_dst;
 
-			bzero(&addr, sizeof(addr));
-			ip6addr = (__typeof__(ip6addr))&addr;
-			ip6addr->sin6_family = AF_INET6;
-			ip6addr->sin6_len = sizeof(*ip6addr);
-			ip6addr->sin6_addr = ip6->ip6_dst;
-
-			// update the receiving interface address based on the inner address
-			ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
-			if (ifa) {
-				m->m_pkthdr.rcvif = ifa->ifa_ifp;
-				IFA_REMREF(ifa);
-			}
+		// update the receiving interface address based on the inner address
+		ifa = ifa_ifwithaddr((struct sockaddr *)&addr);
+		if (ifa) {
+			m->m_pkthdr.rcvif = ifa->ifa_ifp;
+			IFA_REMREF(ifa);
 		}
 
 		// Input via IPSec interface
@@ -984,10 +988,7 @@ fail:
 }
 
 void
-ah6_ctlinput(cmd, sa, d)
-	int cmd;
-	struct sockaddr *sa;
-	void *d;
+ah6_ctlinput(int cmd, struct sockaddr *sa, void *d)
 {
 	const struct newah *ahp;
 	struct newah ah;

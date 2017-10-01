@@ -188,7 +188,7 @@ mach_port_space_info(
 	if (space == IS_NULL)
 		return KERN_INVALID_TASK;
 
-#if !(DEVELOPMENT | DEBUG)
+#if !(DEVELOPMENT || DEBUG) && CONFIG_MACF
 	const boolean_t dbg_ok = (mac_task_check_expose_task(kernel_task) == 0);
 #else
 	const boolean_t dbg_ok = TRUE;
@@ -269,9 +269,12 @@ mach_port_space_info(
 
 	/* prepare the table out-of-line data for return */
 	if (table_size > 0) {
-		if (table_size > infop->iis_table_size * sizeof(ipc_info_name_t))
+		vm_size_t used_table_size;
+
+		used_table_size = infop->iis_table_size * sizeof(ipc_info_name_t);
+		if (table_size > used_table_size)
 			bzero((char *)&table_info[infop->iis_table_size],
-			      table_size - infop->iis_table_size * sizeof(ipc_info_name_t));
+			      table_size - used_table_size);
 
 		kr = vm_map_unwire(
 			ipc_kernel_map,
@@ -282,7 +285,7 @@ mach_port_space_info(
 			FALSE);
 		assert(kr == KERN_SUCCESS);
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)table_addr, 
-				   (vm_map_size_t)table_size, TRUE, &copy);
+				   (vm_map_size_t)used_table_size, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 		*tablep = (ipc_info_name_t *)copy;
 		*tableCntp = infop->iis_table_size;

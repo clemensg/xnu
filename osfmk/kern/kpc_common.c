@@ -31,6 +31,7 @@
 #include <kern/processor.h>
 #include <kern/kalloc.h>
 #include <sys/errno.h>
+#include <sys/vm.h>
 #include <kperf/buffer.h>
 #include <kern/thread.h>
 
@@ -61,6 +62,8 @@ static boolean_t force_all_ctrs = FALSE;
 static kpc_pm_handler_t		kpc_pm_handler;
 static boolean_t		kpc_pm_has_custom_config;
 static uint64_t			kpc_pm_pmc_mask;
+
+boolean_t kpc_context_switch_active = FALSE;
 
 void kpc_common_init(void);
 void
@@ -109,13 +112,32 @@ kpc_register_cpu(struct cpu_data *cpu_data)
 	return TRUE;
 
 error:
-	kfree(cpu_data->cpu_kpc_buf[0], COUNTERBUF_SIZE_PER_CPU);
-	kfree(cpu_data->cpu_kpc_buf[1], COUNTERBUF_SIZE_PER_CPU);
-	kfree(cpu_data->cpu_kpc_shadow, COUNTERBUF_SIZE_PER_CPU);
-	kfree(cpu_data->cpu_kpc_reload, COUNTERBUF_SIZE_PER_CPU);
-
+	kpc_unregister_cpu(cpu_data);
 	return FALSE;
 }
+
+void
+kpc_unregister_cpu(struct cpu_data *cpu_data)
+{
+	assert(cpu_data);
+	if (cpu_data->cpu_kpc_buf[0] != NULL) {
+		kfree(cpu_data->cpu_kpc_buf[0], COUNTERBUF_SIZE_PER_CPU);
+		cpu_data->cpu_kpc_buf[0] = NULL;
+	}
+	if (cpu_data->cpu_kpc_buf[1] != NULL) {
+		kfree(cpu_data->cpu_kpc_buf[1], COUNTERBUF_SIZE_PER_CPU);
+		cpu_data->cpu_kpc_buf[1] = NULL;
+	}
+	if (cpu_data->cpu_kpc_shadow != NULL) {
+		kfree(cpu_data->cpu_kpc_shadow, COUNTERBUF_SIZE_PER_CPU);
+		cpu_data->cpu_kpc_shadow = NULL;
+	}
+	if (cpu_data->cpu_kpc_reload != NULL) {	
+		kfree(cpu_data->cpu_kpc_reload, COUNTERBUF_SIZE_PER_CPU);
+		cpu_data->cpu_kpc_reload = NULL;
+	}
+}
+
 
 static void
 kpc_task_set_forced_all_ctrs(task_t task, boolean_t state)
@@ -412,6 +434,7 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 int
 kpc_set_config(uint32_t classes, kpc_config_t *configv)
 {
+	int ret = 0;
 	struct kpc_config_remote mp_config = {
 		.classes = classes, .configv = configv,
 		.pmc_mask = kpc_get_configurable_pmc_mask(classes)
@@ -437,11 +460,11 @@ kpc_set_config(uint32_t classes, kpc_config_t *configv)
 	if (classes & KPC_CLASS_POWER_MASK)
 		mp_config.classes |= KPC_CLASS_CONFIGURABLE_MASK;
 
-	kpc_set_config_arch( &mp_config );
+	ret = kpc_set_config_arch( &mp_config );
 
 	lck_mtx_unlock(&kpc_config_lock);
 
-	return 0;
+	return ret;
 }
 
 /* allocate a buffer large enough for all possible counters */
@@ -471,24 +494,19 @@ kpc_sample_kperf(uint32_t actionid)
 {
 	struct kperf_sample sbuf;
 	struct kperf_context ctx;
-	task_t task = NULL;
-	int r;
 
-	BUF_DATA1(PERF_KPC_HNDLR | DBG_FUNC_START, 0);
+	BUF_DATA(PERF_KPC_HNDLR | DBG_FUNC_START);
 
 	ctx.cur_pid = 0;
 	ctx.cur_thread = current_thread();
-
-	task = chudxnu_task_for_thread(ctx.cur_thread);
-	if (task)
-		ctx.cur_pid = chudxnu_pid_for_task(task);
+	ctx.cur_pid = task_pid(current_task());
 
 	ctx.trigger_type = TRIGGER_TYPE_PMI;
 	ctx.trigger_id = 0;
 
-	r = kperf_sample(&sbuf, &ctx, actionid, SAMPLE_FLAG_PEND_USER);
+	int r = kperf_sample(&sbuf, &ctx, actionid, SAMPLE_FLAG_PEND_USER);
 
-	BUF_INFO1(PERF_KPC_HNDLR | DBG_FUNC_END, r);
+	BUF_INFO(PERF_KPC_HNDLR | DBG_FUNC_END, r);
 }
 
 
@@ -785,4 +803,3 @@ exit:
 
 	return cfg_mask | pwr_mask;
 }
-

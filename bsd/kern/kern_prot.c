@@ -95,8 +95,7 @@
 #include <sys/timeb.h>
 #include <sys/times.h>
 #include <sys/malloc.h>
-
-#define chgproccnt_ok(p) 1
+#include <sys/persona.h>
 
 #include <security/audit/audit.h>
 
@@ -581,7 +580,7 @@ setsid(proc_t p, __unused struct setsid_args *uap, int32_t *retval)
  * XXX:		Belongs in kern_proc.c
  */
 int
-setpgid(proc_t curp, register struct setpgid_args *uap, __unused int32_t *retval)
+setpgid(proc_t curp, struct setpgid_args *uap, __unused int32_t *retval)
 {
 	proc_t targp = PROC_NULL;	/* target process */
 	struct pgrp *pg = PGRP_NULL;	/* target pgrp */
@@ -778,11 +777,11 @@ setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 			 * may be able to decrement the proc count of B before we can increment it. This results in a panic.
 			 * Incrementing the proc count of the target ruid, B, before setting the process credentials prevents this race.
 			 */
-			if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 				(void)chgproccnt(ruid, 1);
 			}
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -792,12 +791,12 @@ setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 			 * Note: the kauth_cred_setresuid has consumed a reference to my_cred, it p_ucred != my_cred, then my_cred must not be dereferenced!
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				/*
 				 * We didn't successfully switch to the new ruid, so decrement
 				 * the procs/uid count that we incremented above.
 				 */
-				if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+				if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 					(void)chgproccnt(ruid, -1);
 				}
 				kauth_cred_unref(&my_new_cred);
@@ -811,12 +810,12 @@ setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 			PROC_UPDATE_CREDS_ONPROC(p);
 
 			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 			/*
 			 * If we've updated the ruid, decrement the count of procs running
 			 * under the previous ruid
 			 */
-			if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 				(void)chgproccnt(my_pcred->cr_ruid, -1);
 			}
 		}
@@ -885,7 +884,7 @@ seteuid(proc_t p, struct seteuid_args *uap, __unused int32_t *retval)
 
 			DEBUG_CRED_CHANGE("seteuid CH(%d): %p/0x%08x -> %p/0x%08x\n", p->p_pid, my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -893,7 +892,7 @@ seteuid(proc_t p, struct seteuid_args *uap, __unused int32_t *retval)
 			 * should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				my_cred = kauth_cred_proc_ref(p);
 				my_pcred = posix_cred_get(my_cred);
@@ -904,7 +903,7 @@ seteuid(proc_t p, struct seteuid_args *uap, __unused int32_t *retval)
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}
@@ -1026,11 +1025,11 @@ setreuid(proc_t p, struct setreuid_args *uap, __unused int32_t *retval)
 			 * may be able to decrement the proc count of B before we can increment it. This results in a panic.
 			 * Incrementing the proc count of the target ruid, B, before setting the process credentials prevents this race.
 			 */
-			if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 				(void)chgproccnt(ruid, 1);
 			}
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -1040,8 +1039,8 @@ setreuid(proc_t p, struct setreuid_args *uap, __unused int32_t *retval)
 			 * Note: the kauth_cred_setresuid has consumed a reference to my_cred, it p_ucred != my_cred, then my_cred must not be dereferenced!
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
-				if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+				proc_ucred_unlock(p);
+				if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 					/*
 					 * We didn't successfully switch to the new ruid, so decrement
 					 * the procs/uid count that we incremented above.
@@ -1059,9 +1058,9 @@ setreuid(proc_t p, struct setreuid_args *uap, __unused int32_t *retval)
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 
-			if (ruid != KAUTH_UID_NONE && chgproccnt_ok(p)) {
+			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
 				/*
 				 * We switched to a new ruid, so decrement the count of procs running
 				 * under the previous ruid
@@ -1155,7 +1154,7 @@ setgid(proc_t p, struct setgid_args *uap, __unused int32_t *retval)
 
 			DEBUG_CRED_CHANGE("setgid(CH)%d: %p/0x%08x->%p/0x%08x\n", p->p_pid, my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -1163,7 +1162,7 @@ setgid(proc_t p, struct setgid_args *uap, __unused int32_t *retval)
 			 * should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				/* try again */
 				my_cred = kauth_cred_proc_ref(p);
@@ -1174,7 +1173,7 @@ setgid(proc_t p, struct setgid_args *uap, __unused int32_t *retval)
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}
@@ -1246,7 +1245,7 @@ setegid(proc_t p, struct setegid_args *uap, __unused int32_t *retval)
 
 			DEBUG_CRED_CHANGE("setegid(CH)%d: %p/0x%08x->%p/0x%08x\n", p->p_pid, my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -1254,7 +1253,7 @@ setegid(proc_t p, struct setegid_args *uap, __unused int32_t *retval)
 			 * should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				/* try again */
 				my_cred = kauth_cred_proc_ref(p);
@@ -1265,7 +1264,7 @@ setegid(proc_t p, struct setegid_args *uap, __unused int32_t *retval)
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}
@@ -1393,14 +1392,14 @@ setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 
 			DEBUG_CRED_CHANGE("setregid(CH)%d: %p/0x%08x->%p/0x%08x\n", p->p_pid, my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/* need to protect for a race where another thread
 			 * also changed the credential after we took our
 			 * reference.  If p_ucred has changed then we
 			 * should restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				/* try again */
 				my_cred = kauth_cred_proc_ref(p);
@@ -1411,7 +1410,7 @@ setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			OSBitOrAtomic(P_SUGID, &p->p_flag); /* XXX redundant? */
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}
@@ -1698,7 +1697,7 @@ setgroups1(proc_t p, u_int gidsetsize, user_addr_t gidset, uid_t gmuid, __unused
 
 				DEBUG_CRED_CHANGE("setgroups1(CH)%d: %p/0x%08x->%p/0x%08x\n", p->p_pid, my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
 
-				proc_lock(p);
+				proc_ucred_lock(p);
 				/*
 				 * We need to protect for a race where another
 				 * thread also changed the credential after we
@@ -1707,7 +1706,7 @@ setgroups1(proc_t p, u_int gidsetsize, user_addr_t gidset, uid_t gmuid, __unused
 				 * with the new cred.
 				 */
 				if (p->p_ucred != my_cred) {
-					proc_unlock(p);
+					proc_ucred_unlock(p);
 					kauth_cred_unref(&my_new_cred);
 					my_cred = kauth_cred_proc_ref(p);
 					/* try again */
@@ -1717,7 +1716,7 @@ setgroups1(proc_t p, u_int gidsetsize, user_addr_t gidset, uid_t gmuid, __unused
 				/* update cred on proc */
 				PROC_UPDATE_CREDS_ONPROC(p);
 				OSBitOrAtomic(P_SUGID, &p->p_flag);
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 			}
 			break;
 		}

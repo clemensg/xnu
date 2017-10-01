@@ -1337,6 +1337,11 @@ kauth_identity_updatecache(struct kauth_identity_extlookup *elp, struct kauth_id
 			if ((kip->ki_valid & KI_VALID_UID) && (kip->ki_uid == elp->el_uid)) {
 				if (elp->el_flags & KAUTH_EXTLOOKUP_VALID_SUPGRPS) {
 					assert(elp->el_sup_grp_cnt <= NGROUPS);
+					if (elp->el_sup_grp_cnt > NGROUPS) {
+						KAUTH_DEBUG("CACHE - invalid sup_grp_cnt provided (%d), truncating to  %d",
+							   elp->el_sup_grp_cnt, NGROUPS);
+						elp->el_sup_grp_cnt = NGROUPS;
+					}
 					kip->ki_supgrpcnt = elp->el_sup_grp_cnt;
 					memcpy(kip->ki_supgrps, elp->el_sup_groups, sizeof(elp->el_sup_groups[0]) * kip->ki_supgrpcnt);
 					kip->ki_valid |= KI_VALID_GROUPS;
@@ -2073,14 +2078,66 @@ static int	kauth_cred_cache_lookup(int from, int to, void *src, void *dst);
 
 #if CONFIG_EXT_RESOLVER == 0
 /*
- * If there's no resolver, short-circuit the kauth_cred_x2y() lookups.
+ * If there's no resolver, only support a subset of the kauth_cred_x2y() lookups.
  */
 static __inline int
-kauth_cred_cache_lookup(__unused int from, __unused int to,
-	__unused void *src, __unused void *dst)
+kauth_cred_cache_lookup(int from, int to, void *src, void *dst)
 {
-	return (EWOULDBLOCK);
+	/* NB: These must match the definitions used by Libinfo's mbr_identifier_translate(). */
+	static const uuid_t _user_compat_prefix = {0xff, 0xff, 0xee, 0xee, 0xdd, 0xdd, 0xcc, 0xcc, 0xbb, 0xbb, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00};
+	static const uuid_t _group_compat_prefix = {0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef, 0x00, 0x00, 0x00, 0x00};
+#define COMPAT_PREFIX_LEN	(sizeof(uuid_t) - sizeof(id_t))
 
+	assert(from != to);
+
+	switch (from) {
+	case KI_VALID_UID: {
+		id_t uid = htonl(*(id_t *)src);
+
+		if (to == KI_VALID_GUID) {
+			uint8_t *uu = dst;
+			memcpy(uu, _user_compat_prefix, sizeof(_user_compat_prefix));
+			memcpy(&uu[COMPAT_PREFIX_LEN], &uid, sizeof(uid));
+			return (0);
+		}
+		break;
+	}
+	case KI_VALID_GID: {
+		id_t gid = htonl(*(id_t *)src);
+
+		if (to == KI_VALID_GUID) {
+			uint8_t *uu = dst;
+			memcpy(uu, _group_compat_prefix, sizeof(_group_compat_prefix));
+			memcpy(&uu[COMPAT_PREFIX_LEN], &gid, sizeof(gid));
+			return (0);
+		}
+		break;
+	}
+	case KI_VALID_GUID: {
+		const uint8_t *uu = src;
+
+		if (to == KI_VALID_UID) {
+			if (memcmp(uu, _user_compat_prefix, COMPAT_PREFIX_LEN) == 0) {
+				id_t uid;
+				memcpy(&uid, &uu[COMPAT_PREFIX_LEN], sizeof(uid));
+				*(id_t *)dst = ntohl(uid);
+				return (0);
+			}
+		} else if (to == KI_VALID_GID) {
+			if (memcmp(uu, _group_compat_prefix, COMPAT_PREFIX_LEN) == 0) {
+				id_t gid;
+				memcpy(&gid, &uu[COMPAT_PREFIX_LEN], sizeof(gid));
+				*(id_t *)dst = ntohl(gid);
+				return (0);
+			}
+		}
+		break;
+	}
+	default:
+		/* NOT IMPLEMENTED */
+		break;
+	}
+	return (ENOENT);
 }
 #endif
 
@@ -2261,6 +2318,45 @@ kauth_cred_guid2gid(guid_t *guidp, gid_t *gidp)
 	return(kauth_cred_cache_lookup(KI_VALID_GUID, KI_VALID_GID, guidp, gidp));
 }
 
+/*
+ * kauth_cred_nfs4domain2dsnode
+ *
+ * Description: Fetch dsnode from nfs4domain
+ *
+ * Parameters:	nfs4domain			Pointer to a string nfs4 domain
+ *		dsnode				Pointer to buffer for dsnode
+ *
+ * Returns:	0				Success
+ *		ENOENT				For now just a stub that always fails
+ *
+ * Implicit returns:
+ *		*dsnode				Modified, if successuful
+ */
+int
+kauth_cred_nfs4domain2dsnode(__unused char *nfs4domain, __unused char *dsnode)
+{
+	return(ENOENT);
+}
+
+/*
+ * kauth_cred_dsnode2nfs4domain
+ *
+ * Description: Fetch nfs4domain from dsnode
+ *
+ * Parameters:	nfs4domain			Pointer to  string dsnode
+ *		dsnode				Pointer to buffer for nfs4domain
+ *
+ * Returns:	0				Success
+ *		ENOENT				For now just a stub that always fails
+ *
+ * Implicit returns:
+ *		*nfs4domain			Modified, if successuful
+ */
+int
+kauth_cred_dsnode2nfs4domain(__unused char *dsnode, __unused char *nfs4domain)
+{
+	return(ENOENT);
+}
 
 /*
  * kauth_cred_ntsid2uid
@@ -2705,6 +2801,11 @@ kauth_cred_cache_lookup(int from, int to, void *src, void *dst)
 			 * changing access to server file system objects on each
 			 * expiration.
 			 */
+			if (ki.ki_supgrpcnt > NGROUPS) {
+				panic("kauth data structure corrupted. kauth identity 0x%p with %d groups, greater than max of %d",
+					&ki, ki.ki_supgrpcnt, NGROUPS);
+			}
+
 			el.el_sup_grp_cnt = ki.ki_supgrpcnt;
 
 			memcpy(el.el_sup_groups, ki.ki_supgrps, sizeof (el.el_sup_groups[0]) * ki.ki_supgrpcnt);
@@ -3159,11 +3260,11 @@ kauth_cred_ismember_guid(__unused kauth_cred_t cred, guid_t *guidp, int *resultp
 		*resultp = 1;
 		break;
 	default:
-#if CONFIG_EXT_RESOLVER
 	{
-		struct kauth_identity ki;
 		gid_t gid;
-#if 6603280
+#if CONFIG_EXT_RESOLVER
+		struct kauth_identity ki;
+
 		/*
 		 * Grovel the identity cache looking for this GUID.
 		 * If we find it, and it is for a user record, return
@@ -3190,7 +3291,7 @@ kauth_cred_ismember_guid(__unused kauth_cred_t cred, guid_t *guidp, int *resultp
 				return (0);
 			}
 		}
-#endif /* 6603280 */
+#endif /* CONFIG_EXT_RESOLVER */
 		/*
 		 * Attempt to translate the GUID to a GID.  Even if
 		 * this fails, we will have primed the cache if it is
@@ -3207,13 +3308,12 @@ kauth_cred_ismember_guid(__unused kauth_cred_t cred, guid_t *guidp, int *resultp
 				error = 0;
 			}
 		} else {
+#if CONFIG_EXT_RESOLVER
  do_check:
+#endif /* CONFIG_EXT_RESOLVER */
 			error = kauth_cred_ismember_gid(cred, gid, resultp);
 		}
 	}
-#else	/* CONFIG_EXT_RESOLVER */
-		error = ENOENT;
-#endif	/* CONFIG_EXT_RESOLVER */
 		break;
 	}
 	return(error);
@@ -3598,7 +3698,7 @@ kauth_cred_get_with_ref(void)
  * Returns:	(kauth_cred_t)			Pointer to the process's
  *						newly referenced credential
  *
- * Locks:	PROC_LOCK is held before taking the reference and released
+ * Locks:	PROC_UCRED_LOCK is held before taking the reference and released
  *		after the refeence is taken to protect the p_ucred field of
  *		the process referred to by procp.
  *
@@ -3620,10 +3720,10 @@ kauth_cred_proc_ref(proc_t procp)
 {
 	kauth_cred_t 	cred;
 	
-	proc_lock(procp);
+	proc_ucred_lock(procp);
 	cred = proc_ucred(procp);
 	kauth_cred_ref(cred);
-	proc_unlock(procp);
+	proc_ucred_unlock(procp);
 	return(cred);
 }
 
@@ -4456,7 +4556,7 @@ int kauth_proc_label_update(struct proc *p, struct label *label)
 
 			DEBUG_CRED_CHANGE("kauth_proc_setlabel_unlocked CH(%d): %p/0x%08x -> %p/0x%08x\n", p->p_pid, my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -4464,7 +4564,7 @@ int kauth_proc_label_update(struct proc *p, struct label *label)
 			 * restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				my_cred = kauth_cred_proc_ref(p);
 				/* try again */
@@ -4475,7 +4575,7 @@ int kauth_proc_label_update(struct proc *p, struct label *label)
 			PROC_UPDATE_CREDS_ONPROC(p);
 
 			mac_proc_set_enforce(p, MAC_ALL_ENFORCE);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}
@@ -4536,7 +4636,7 @@ kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
 
 			DEBUG_CRED_CHANGE("kauth_proc_label_update_execve_unlocked CH(%d): %p/0x%08x -> %p/0x%08x\n", p->p_pid, my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
 
-			proc_lock(p);
+			proc_ucred_lock(p);
 			/*
 			 * We need to protect for a race where another thread
 			 * also changed the credential after we took our
@@ -4544,7 +4644,7 @@ kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
 			 * restart this again with the new cred.
 			 */
 			if (p->p_ucred != my_cred) {
-				proc_unlock(p);
+				proc_ucred_unlock(p);
 				kauth_cred_unref(&my_new_cred);
 				my_cred = kauth_cred_proc_ref(p);
 				/* try again */
@@ -4554,7 +4654,7 @@ kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
 			/* update cred on proc */
 			PROC_UPDATE_CREDS_ONPROC(p);
 			mac_proc_set_enforce(p, MAC_ALL_ENFORCE);
-			proc_unlock(p);
+			proc_ucred_unlock(p);
 		}
 		break;
 	}

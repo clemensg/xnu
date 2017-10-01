@@ -2839,7 +2839,8 @@ getsockaddrlist(struct socket *so, struct sockaddr_list **slp,
 
 	*slp = NULL;
 
-	if (uaddr == USER_ADDR_NULL || uaddrlen == 0)
+	if (uaddr == USER_ADDR_NULL || uaddrlen == 0 ||
+	    uaddrlen > (sizeof(struct sockaddr_in6) * SOCKADDRLIST_MAX_ENTRIES))
 		return (EINVAL);
 
 	sl = sockaddrlist_alloc(M_WAITOK);
@@ -2870,7 +2871,7 @@ getsockaddrlist(struct socket *so, struct sockaddr_list **slp,
 		} else if (ss.ss_len > sizeof (ss)) {
 			/*
 			 * sockaddr_storage size is less than SOCK_MAXADDRLEN,
-			 * so the check here is inclusive.  We could user the
+			 * so the check here is inclusive.  We could use the
 			 * latter instead, but seems like an overkill for now.
 			 */
 			error = ENAMETOOLONG;
@@ -2878,8 +2879,10 @@ getsockaddrlist(struct socket *so, struct sockaddr_list **slp,
 		}
 
 		se = sockaddrentry_alloc(M_WAITOK);
-		if (se == NULL)
+		if (se == NULL) {
+			error = ENOBUFS;
 			break;
+		}
 
 		sockaddrlist_insert(sl, se);
 

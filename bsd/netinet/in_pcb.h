@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -498,6 +498,15 @@ struct	xinpgen {
 #if IPSEC
 #define	in6p_sp		inp_sp
 #endif /* IPSEC */
+#define INP_INC_IFNET_STAT(_inp_, _stat_) { \
+	if ((_inp_)->inp_last_outifp != NULL) { \
+		if ((_inp_)->inp_vflag & INP_IPV6) { \
+			(_inp_)->inp_last_outifp->if_ipv6_stat->_stat_++;\
+		} else { \
+			(_inp_)->inp_last_outifp->if_ipv4_stat->_stat_++;\
+		}\
+	}\
+}
 
 struct inpcbport {
 	LIST_ENTRY(inpcbport) phd_hash;
@@ -585,6 +594,9 @@ struct inpcbinfo {
 	lck_attr_t		*ipi_lock_attr;
 	lck_grp_t		*ipi_lock_grp;
 	lck_grp_attr_t		*ipi_lock_grp_attr;
+
+#define	INPCBINFO_UPDATE_MSS	0x1
+	u_int32_t		ipi_flags;
 };
 
 #define	INP_PCBHASH(faddr, lport, fport, mask) \
@@ -606,6 +618,8 @@ struct inpcbinfo {
 	((_inp)->inp_flags2 & INP2_NO_IFF_EXPENSIVE)
 #define	INP_AWDL_UNRESTRICTED(_inp) \
 	((_inp)->inp_flags2 & INP2_AWDL_UNRESTRICTED)
+#define	INP_INTCOPROC_ALLOWED(_inp) \
+	((_inp)->inp_flags2 & INP2_INTCOPROC_ALLOWED)
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -682,7 +696,8 @@ struct inpcbinfo {
 #define	INP2_NO_IFF_EXPENSIVE	0x00000008 /* do not use expensive interface */
 #define	INP2_INHASHLIST		0x00000010 /* pcb is in inp_hash list */
 #define	INP2_AWDL_UNRESTRICTED	0x00000020 /* AWDL restricted mode allowed */
-#define	INP2_KEEPALIVE_OFFLOAD	0x00000040 /* Enable UDP keepalive offload */
+#define	INP2_KEEPALIVE_OFFLOAD	0x00000040 /* Enable UDP or TCP keepalive offload */
+#define INP2_INTCOPROC_ALLOWED	0x00000080 /* Allow communication via internal co-processor interfaces */
 
 /*
  * Flags passed to in_pcblookup*() functions.
@@ -739,7 +754,7 @@ extern void in_pcbdispose(struct inpcb *);
 extern void in_pcbdisconnect(struct inpcb *);
 extern int in_pcbinshash(struct inpcb *, int);
 extern int in_pcbladdr(struct inpcb *, struct sockaddr *, struct in_addr *,
-    unsigned int, struct ifnet **);
+    unsigned int, struct ifnet **, int);
 extern struct inpcb *in_pcblookup_local(struct inpcbinfo *, struct in_addr,
     u_int, int);
 extern struct inpcb *in_pcblookup_local_and_cleanup(struct inpcbinfo *,
@@ -783,6 +798,9 @@ extern void inp_set_noexpensive(struct inpcb *);
 extern void inp_set_awdl_unrestricted(struct inpcb *);
 extern boolean_t inp_get_awdl_unrestricted(struct inpcb *);
 extern void inp_clear_awdl_unrestricted(struct inpcb *);
+extern void inp_set_intcoproc_allowed(struct inpcb *);
+extern boolean_t inp_get_intcoproc_allowed(struct inpcb *);
+extern void inp_clear_intcoproc_allowed(struct inpcb *);
 #if NECP
 extern void inp_update_necp_policy(struct inpcb *, struct sockaddr *, struct sockaddr *, u_int);
 extern void inp_set_want_app_policy(struct inpcb *);
@@ -799,6 +817,13 @@ extern void inp_get_soprocinfo(struct inpcb *, struct so_procinfo *);
 extern int inp_update_policy(struct inpcb *);
 extern boolean_t inp_restricted_recv(struct inpcb *, struct ifnet *);
 extern boolean_t inp_restricted_send(struct inpcb *, struct ifnet *);
+extern void inp_incr_sndbytes_total(struct socket *, int);
+extern void inp_decr_sndbytes_total(struct socket *, int);
+extern void inp_count_sndbytes(struct inpcb *, u_int32_t);
+extern void inp_incr_sndbytes_unsent(struct socket *, int32_t);
+extern void inp_decr_sndbytes_unsent(struct socket *, int32_t);
+extern int32_t inp_get_sndbytes_allunsent(struct socket *, u_int32_t);
+extern void inp_decr_sndbytes_allunsent(struct socket *, u_int32_t);
 #endif /* BSD_KERNEL_PRIVATE */
 #ifdef KERNEL_PRIVATE
 /* exported for PPP */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -233,7 +233,6 @@ mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
 			continue; /* Keep going until UIO is done */
 		default:
 			return (ENODEV);
-			break;
 		}
 			
 		if (error)
@@ -253,7 +252,8 @@ void dev_kmem_init(void)
 {
 	uint32_t kmem;
 
-	if (PE_parse_boot_argn("kmem", &kmem, sizeof (kmem))) {
+	if (PE_i_can_has_debugger(NULL) &&
+	    PE_parse_boot_argn("kmem", &kmem, sizeof (kmem))) {
 		if (kmem & 0x1) {
 			dev_kmem_enabled = TRUE;
 		}
